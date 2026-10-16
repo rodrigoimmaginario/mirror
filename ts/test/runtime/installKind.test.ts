@@ -38,7 +38,10 @@ function files(contents: Record<string, string>) {
 
 test("a git checkout carrying a root package.json is a clone", () => {
   // CV22.DS10.US3 decision D2: the manifest sits at the repository root.
-  const root = "/home/dev/mirror";
+  // Resolved, as every fixture root below is, because the detector resolves
+  // what it probes: on Windows `/home/dev/mirror` comes back from the walk
+  // as `C:\home\dev\mirror`, and an unresolved fixture never matches it.
+  const root = resolve("/home/dev/mirror");
   const kind = detectInstallKind({
     frontDoorPath: join(root, "ts/src/frontDoor/cli.ts"),
     exists: fs([join(root, ".git"), join(root, "package.json")]),
@@ -48,7 +51,7 @@ test("a git checkout carrying a root package.json is a clone", () => {
 });
 
 test("a global npm install is a package, named and versioned from its manifest", () => {
-  const globalRoot = "/usr/local/lib/node_modules";
+  const globalRoot = resolve("/usr/local/lib/node_modules");
   const pkg = join(globalRoot, "mirror-mind");
   const kind = detectInstallKind({
     frontDoorPath: join(pkg, "ts/src/frontDoor/cli.ts"),
@@ -65,8 +68,8 @@ test("a checkout LINKED under the global root (npm link) is a clone, not a packa
   // front door reached through it has a path that LOOKS installed. Updating
   // that with `npm install -g` would replace the developer's link with a
   // registry copy. The detector resolves symlinks before it decides.
-  const globalRoot = "/usr/local/lib/node_modules";
-  const checkout = "/home/dev/mirror";
+  const globalRoot = resolve("/usr/local/lib/node_modules");
+  const checkout = resolve("/home/dev/mirror");
   const linked = join(globalRoot, "mirror-mind", "ts/src/frontDoor/cli.ts");
   const kind = detectInstallKind({
     frontDoorPath: linked,
@@ -132,7 +135,7 @@ const GLOBAL_MANIFEST = JSON.stringify({
 });
 
 test("a global prefix layout with the bin linked into the package is a package, with no npm probe", () => {
-  const prefix = "/opt/homebrew";
+  const prefix = resolve("/opt/homebrew");
   const pkg = join(prefix, "lib/node_modules/mirror-mind");
   const binLink = join(prefix, "bin/mirror");
   const kind = detectInstallKind({
@@ -189,14 +192,18 @@ test("npm's global root is resolved through symlinks before containment is judge
   // Found by the update smoke on macOS, where /tmp is a symlink to
   // /private/tmp: the front door's path is resolved, `npm root -g` answered
   // the unresolved form, and the install under it read as not inside it.
-  const resolvedRoot = "/private/tmp/prefix/lib/node_modules";
+  const resolvedRoot = resolve("/private/tmp/prefix/lib/node_modules");
+  const unresolvedRoot = resolve("/tmp/prefix/lib/node_modules");
   const pkg = join(resolvedRoot, "mirror-mind");
   const kind = detectInstallKind({
     frontDoorPath: join(pkg, "ts/src/frontDoor/cli.ts"),
-    npmRootGlobal: "/tmp/prefix/lib/node_modules",
+    npmRootGlobal: unresolvedRoot,
     exists: fs([join(pkg, "package.json")]),
     readFile: () => GLOBAL_MANIFEST,
-    realpath: (path) => path.replace(/^\/tmp\//, "/private/tmp/"),
+    realpath: (path) =>
+      key(path).startsWith(key(unresolvedRoot))
+        ? resolvedRoot + path.slice(unresolvedRoot.length)
+        : path,
   });
   assert.deepEqual(kind, { kind: "package", root: pkg, name: "mirror-mind", version: "1.2.3" });
 });
@@ -205,19 +212,17 @@ test("an npm-linked checkout reached through the global bin is still a clone", (
   // `npm link`: `<prefix>/bin/mirror` resolves into the checkout, whose root
   // is not under a `lib/node_modules`, so the layout evidence does not apply
   // and the `.git` beside the manifest decides.
-  const checkout = "/home/dev/mirror";
+  const checkout = resolve("/home/dev/mirror");
+  const linkedPkg = resolve("/opt/homebrew/lib/node_modules/mirror-mind");
+  const binLink = resolve("/opt/homebrew/bin/mirror");
   const kind = detectInstallKind({
-    frontDoorPath: "/opt/homebrew/lib/node_modules/mirror-mind/ts/src/frontDoor/cli.ts",
-    exists: fs([
-      join(checkout, ".git"),
-      join(checkout, "package.json"),
-      "/opt/homebrew/bin/mirror",
-    ]),
+    frontDoorPath: join(linkedPkg, "ts/src/frontDoor/cli.ts"),
+    exists: fs([join(checkout, ".git"), join(checkout, "package.json"), binLink]),
     readFile: () => GLOBAL_MANIFEST,
     realpath: (path) =>
-      path.startsWith("/opt/homebrew/lib/node_modules/mirror-mind/")
-        ? path.replace("/opt/homebrew/lib/node_modules/mirror-mind", checkout)
-        : path === "/opt/homebrew/bin/mirror"
+      key(path).startsWith(`${key(linkedPkg)}/`)
+        ? checkout + path.slice(linkedPkg.length)
+        : key(path) === key(binLink)
           ? join(checkout, "bin/mirror.js")
           : path,
   });
